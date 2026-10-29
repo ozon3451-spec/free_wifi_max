@@ -4,12 +4,14 @@
 import asyncio
 import secrets
 import logging
+import os
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     MessageCreated,
-    CommandStart,
+    BotStarted,
     MessageButton,
     ButtonsPayload,
     RequestGeoLocationButton,
@@ -31,20 +33,39 @@ from states import state_mgr
 # НАСТРОЙКИ
 
 
-# ТОКЕЕЕЕЕЕЕЕЕЕЕН
-BOT_TOKEN = " "
+def load_env_file(path=".env"):
+    """Загружает простые KEY=VALUE настройки из .env без доп. зависимостей."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
 
-# ВАШЕ ID администратора
+
+load_env_file()
+BOT_TOKEN = os.getenv("MAX_BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не задан MAX_BOT_TOKEN. Создайте файл .env по образцу .env.example "
+        "и укажите токен бота MAX."
+    )
+
+# Можно указать несколько ID через запятую: ADMIN_IDS=123,456
 ADMIN_IDS = [
-    " "
+    value.strip()
+    for value in os.getenv("ADMIN_IDS", "").split(",")
+    if value.strip()
 ]
-
-
-
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
 
 
 # РАБОТА С РОЛЯМИ
@@ -150,7 +171,17 @@ def get_confirm_keyboard():
     return make_keyboard([
         ["Да", "Нет"]
     ])
-
+def get_geo_keyboard():
+    return ButtonsPayload(
+        buttons=[
+            [
+                RequestGeoLocationButton(
+                    text="📍 Отправить геопозицию",
+                    quick=True,
+                )
+            ]
+        ]
+    ).pack()
 
 # ВСПОМОГАТЕЛЬНОЕ
 
@@ -175,161 +206,80 @@ def get_text(message):
 
 
 
-# /START
+# ЗАПУСК БОТА И DEEP-LINK ПРИГЛАШЕНИЯ
 
 
-@dp.message_created(CommandStart())
-async def start_command(event: MessageCreated):
+def ensure_user_exists(user_id):
+    """Создаёт обычную роль, только если у пользователя ещё нет ролей."""
+    user_id = str(user_id)
+    if not UserRole.select().where(UserRole.user_id == user_id).exists():
+        UserRole.create(user_id=user_id, role="user")
 
-    message = event.message
 
-    user_id = get_user_id(message)
+async def send_start_response(user_id, chat_id, message=None, payload=None):
+    """Общий сценарий старта для события MAX bot_started и /start."""
+    user_id = str(user_id)
+    ensure_user_exists(user_id)
 
-    # Получаем текст команды.
-    # Например:
-    # /start
-    # /start ABC123
-    text = get_text(message)
-
-    parts = text.split(maxsplit=1)
-
-    args = ""
-
-    if len(parts) > 1:
-        args = parts[1].strip()
-
-    
-    # Если пользователя ещё нет — создаём обычного user
-    
-
-    exists = (
-        UserRole
-        .select()
-        .where(UserRole.user_id == user_id)
-        .exists()
-    )
-
-    if not exists:
-
-        UserRole.create(
-            user_id=user_id,
-            role="user"
-        )
-
-    
-    # DEEP-LINK
-    
-
-    if args:
-
+    if payload:
         token = (
-            InviteToken
-            .select()
-            .where(
-                (InviteToken.token == args)
-                & (InviteToken.is_used == False)
-            )
+            InviteToken.select()
+            .where((InviteToken.token == payload) & (InviteToken.is_used == False))
             .first()
         )
+        if not token or datetime.now() - token.created_at >= timedelta(minutes=15):
+            text = "Ссылка недействительна или истекла."
+            keyboard = get_menu_keyboard(user_id) if is_operator(user_id) else get_geo_keyboard()
+            await send_reply(message, chat_id, text, keyboard)
+            return
 
-        
-        # Проверяем токен
-        
+        # Не удаляем остальные роли: по требованиям MAX роли суммируются.
+        UserRole.get_or_create(user_id=user_id, role=token.role_to_assign)
+        UserRole.get_or_create(user_id=user_id, role="user")
+        token.is_used = True
+        token.save()
 
-        if token:
-
-            # Ссылка действует 15 минут
-            if (
-                datetime.now() - token.created_at
-                < timedelta(minutes=15)
-            ):
-
-                # Удаляем старые operator/admin роли
-                (
-                    UserRole
-                    .delete()
-                    .where(
-                        (UserRole.user_id == user_id)
-                        & (UserRole.role != "user")
-                    )
-                    .execute()
-                )
-
-                # Выдаём новую роль
-                UserRole.get_or_create(
-                    user_id=user_id,
-                    role=token.role_to_assign
-                )
-
-                # user сохраняем
-                UserRole.get_or_create(
-                    user_id=user_id,
-                    role="user"
-                )
-
-                # Ссылка использована
-                token.is_used = True
-                token.save()
-
-                logging.info(
-                    "Пользователь %s получил роль %s",
-                    user_id,
-                    token.role_to_assign
-                )
-
-                keyboard = get_menu_keyboard(user_id)
-
-                await message.answer(
-                    f"Вам назначена роль "
-                    f"{token.role_to_assign}.",
-                    attachments=[keyboard] if keyboard else None
-                )
-
-                return
-
-        await message.answer(
-            "Ссылка недействительна или истекла."
+        logging.info("Пользователь %s получил роль %s по приглашению", user_id, token.role_to_assign)
+        keyboard = get_menu_keyboard(user_id)
+        await send_reply(
+            message, chat_id,
+            f"Вам назначена роль {token.role_to_assign}.",
+            keyboard,
         )
-
         return
 
-    
-    # ОБЫЧНЫЙ /START
-    
-    roles = get_user_roles(user_id)
-
-    # Только обычный пользователь
-    if roles == ["user"]:
-
-        keyboard = ButtonsPayload(
-            buttons=[
-                [
-                    RequestGeoLocationButton(
-                        text="📍 Отправить геопозицию",
-                        quick=True
-                    )
-                ]
-            ]
-        ).pack()
-
-        await message.answer(
-            "Отправьте свою геолокацию, "
-            "и я пришлю 3 ближайшие точки "
+    if is_operator(user_id):
+        await send_reply(
+            message, chat_id,
+            "Добро пожаловать! Используйте меню ниже.",
+            get_menu_keyboard(user_id),
+        )
+    else:
+        await send_reply(
+            message, chat_id,
+            "Отправьте свою геопозицию, и я пришлю 3 ближайшие точки "
             "бесплатного Wi-Fi в Костроме.",
-            attachments=[keyboard]
+            get_geo_keyboard(),
         )
 
-        return
 
-    # Оператор / администратор
-    keyboard = get_menu_keyboard(user_id)
+async def send_reply(message, chat_id, text, keyboard=None):
+    """Отправляет ответ и для события BotStarted, и для обычного сообщения."""
+    attachments = [keyboard] if keyboard else None
+    if message is not None:
+        await message.answer(text, attachments=attachments)
+    else:
+        await bot.send_message(chat_id=chat_id, text=text, attachments=attachments)
 
-    await message.answer(
-        "Добро пожаловать! "
-        "Используйте меню ниже.",
-        attachments=[keyboard] if keyboard else None
-    )
 
+@dp.bot_started()
+async def bot_started(event: BotStarted):
+    # MAX отправляет это событие при нажатии «Начать» и при переходе по deep-link.
+    user_id = str(event.user.user_id)
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, str):
+        payload = None
+    await send_start_response(user_id, event.chat_id, payload=payload)
 
 
 # ГЕОЛОКАЦИЯ
@@ -341,6 +291,18 @@ async def handle_message(event: MessageCreated):
     message = event.message
 
     user_id = get_user_id(message)
+    exists = (
+        UserRole
+        .select()
+        .where(UserRole.user_id == user_id)
+        .exists()
+    )
+
+    if not exists:
+        UserRole.create(
+            user_id=user_id,
+            role="user",
+        )
 
     print("USER ID FROM MAX:", user_id)
     print("ROLES:", get_user_roles(user_id))
@@ -380,13 +342,13 @@ async def handle_message(event: MessageCreated):
 
     text = get_text(message).strip()
 
-    if text:
-
-        await handle_text(
-            message,
-            user_id,
-            text
-        )
+    # Любое сообщение без координат попадает в текстовый сценарий,
+    # в том числе стикеры/вложения без текста.
+    await handle_text(
+        message,
+        user_id,
+        text
+    )
 
 
 
@@ -1156,13 +1118,27 @@ async def handle_text(
         return
 
     
-    # НЕРАСПОЗНАННЫЙ ТЕКСТ
-    
+    # НЕРАСПОЗНАННОЕ СООБЩЕНИЕ
+    # Если оператор/администратор находится в диалоге ввода, не сбрасываем состояние.
+    if state and operator:
+        await message.answer(
+            "Не удалось обработать сообщение в текущем шаге. "
+            "Отправьте ожидаемые текстовые данные или нажмите «Отмена»."
+        )
+        return
 
+    if not operator:
+        await message.answer(
+            "Чтобы найти 3 ближайшие точки бесплатного Wi-Fi в Костроме, "
+            "отправьте свою геопозицию.",
+            attachments=[get_geo_keyboard()],
+        )
+        return
+
+    keyboard = get_menu_keyboard(user_id)
     await message.answer(
-        "Не удалось распознать команду.\n"
-        "Если вы хотите найти Wi-Fi, "
-        "отправьте свою геолокацию."
+        "Не удалось распознать команду. Выберите действие в меню.",
+        attachments=[keyboard] if keyboard else None,
     )
 
 
@@ -1177,7 +1153,9 @@ async def main():
 
     print("Бот МАКС запускается...")
 
-    # Запускаем polling
+    # Если ранее был настроен webhook, события не будут приходить в polling.
+    # Для этого проекта используется long polling.
+    await bot.delete_webhook()
     await dp.start_polling(bot)
 
 
