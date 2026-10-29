@@ -121,43 +121,39 @@ def make_keyboard(buttons):
 
 
 def get_menu_keyboard(user_id):
-
     roles = get_user_roles(user_id)
 
-    
-    # Администратор
-    
+    geo_button = [
+        RequestGeoLocationButton(
+            text="📍 Отправить геопозицию",
+            quick=True,
+        )
+    ]
 
     if "admin" in roles:
-
-        return make_keyboard([
-            ["Добавить точку"],
-            ["Редактировать точку"],
-            ["Удалить точку"],
-            ["Список точек"],
-            ["Создать ссылку на оператора"],
-            ["Создать ссылку на администратора"],
-            ["Снять оператора"],
-            ["Снять администратора"],
-            ["Список ролей"],
-        ])
-
-    
-    # Оператор
-    
+        return ButtonsPayload(buttons=[
+            geo_button,
+            [MessageButton(text="Добавить точку")],
+            [MessageButton(text="Редактировать точку")],
+            [MessageButton(text="Удалить точку")],
+            [MessageButton(text="Список точек")],
+            [MessageButton(text="Создать ссылку на оператора")],
+            [MessageButton(text="Создать ссылку на администратора")],
+            [MessageButton(text="Снять оператора")],
+            [MessageButton(text="Снять администратора")],
+            [MessageButton(text="Список ролей")],
+        ]).pack()
 
     if "operator" in roles:
+        return ButtonsPayload(buttons=[
+            geo_button,
+            [MessageButton(text="Добавить точку")],
+            [MessageButton(text="Редактировать точку")],
+            [MessageButton(text="Удалить точку")],
+            [MessageButton(text="Список точек")],
+        ]).pack()
 
-        return make_keyboard([
-            ["Добавить точку"],
-            ["Редактировать точку"],
-            ["Удалить точку"],
-            ["Список точек"],
-        ])
-
-    # Обычный пользователь
     return None
-
 
 def get_cancel_keyboard():
 
