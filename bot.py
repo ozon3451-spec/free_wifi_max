@@ -888,199 +888,160 @@ async def handle_text(
         return
 
     
-    # СНЯТИЕ ОПЕРАТОРА
-    
+    # СНЯТИЕ РОЛЕЙ ЧЕРЕЗ СПИСОК И ПОДТВЕРЖДЕНИЕ
 
     if text == "Снять оператора":
-
         if not admin:
-
-            await message.answer(
-                "Недостаточно прав."
-            )
-
+            await message.answer("Недостаточно прав.")
             return
 
-        state_mgr.set_state(
-            user_id,
-            "removing_operator"
+        targets = list(
+            UserRole.select().where(UserRole.role == "operator")
         )
+        if not targets:
+            await message.answer("Операторов пока нет.")
+            return
+
+        state_mgr.set_state(user_id, "selecting_operator_to_remove")
+        keyboard = make_keyboard([
+            [f"Выбрать оператора: {item.user_id}"]
+            for item in targets
+        ] + [["Отмена"]])
 
         await message.answer(
-            "Введите ID пользователя, "
-            "у которого нужно снять "
-            "роль оператора.",
-            attachments=[get_cancel_keyboard()]
+            "Выберите оператора, у которого нужно снять роль:",
+            attachments=[keyboard]
         )
-
         return
-
-    
-    # СНЯТИЕ АДМИНИСТРАТОРА
-    
 
     if text == "Снять администратора":
-
         if not admin:
+            await message.answer("Недостаточно прав.")
+            return
 
+        targets = list(
+            UserRole.select().where(UserRole.role == "admin")
+        )
+        if not targets:
+            await message.answer("Администраторов не найдено.")
+            return
+
+        state_mgr.set_state(user_id, "selecting_admin_to_remove")
+        keyboard = make_keyboard([
+            [f"Выбрать администратора: {item.user_id}"]
+            for item in targets
+        ] + [["Отмена"]])
+
+        await message.answer(
+            "Выберите администратора, у которого нужно снять роль:",
+            attachments=[keyboard]
+        )
+        return
+
+    if state == "selecting_operator_to_remove" and admin:
+        prefix = "Выбрать оператора: "
+        if not text.startswith(prefix):
             await message.answer(
-                "Недостаточно прав."
+                "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
+            return
 
+        target_id = text[len(prefix):].strip()
+        exists = UserRole.select().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == "operator")
+        ).exists()
+
+        if not exists:
+            state_mgr.clear_state(user_id)
+            await message.answer("У этого пользователя уже нет роли оператора.")
             return
 
         state_mgr.set_state(
-            user_id,
-            "removing_admin"
+            user_id, "confirm_remove_operator", {"target_id": target_id}
         )
-
         await message.answer(
-            "Введите ID пользователя, "
-            "у которого нужно снять "
-            "роль администратора.",
-            attachments=[get_cancel_keyboard()]
+            f"Снять роль оператора у пользователя {target_id}?",
+            attachments=[make_keyboard([["Подтвердить снятие"], ["Отмена"]])]
         )
-
         return
 
-   
-    # ОБРАБОТКА СНЯТИЯ ОПЕРАТОРА
-    
-
-    if (
-        state == "removing_operator"
-        and admin
-    ):
-
-        target_id = text
-
-        exists = (
-            UserRole
-            .select()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "operator")
+    if state == "selecting_admin_to_remove" and admin:
+        prefix = "Выбрать администратора: "
+        if not text.startswith(prefix):
+            await message.answer(
+                "Выберите пользователя кнопкой или нажмите «Отмена»."
             )
-            .exists()
-        )
+            return
+
+        target_id = text[len(prefix):].strip()
+        exists = UserRole.select().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == "admin")
+        ).exists()
 
         if not exists:
+            state_mgr.clear_state(user_id)
+            await message.answer("У этого пользователя уже нет роли администратора.")
+            return
 
+        state_mgr.set_state(
+            user_id, "confirm_remove_admin", {"target_id": target_id}
+        )
+        await message.answer(
+            f"Снять роль администратора у пользователя {target_id}?",
+            attachments=[make_keyboard([["Подтвердить снятие"], ["Отмена"]])]
+        )
+        return
+
+    if state in ("confirm_remove_operator", "confirm_remove_admin") and admin:
+        if text != "Подтвердить снятие":
             await message.answer(
-                f"У пользователя {target_id} "
-                "нет роли оператора."
+                "Роль не изменена. Нажмите «Подтвердить снятие» "
+                "или «Отмена»."
             )
+            return
 
-        else:
+        data = state_mgr.get_state(user_id)[1]
+        target_id = str(data.get("target_id", ""))
+        role_to_remove = (
+            "operator" if state == "confirm_remove_operator" else "admin"
+        )
 
-            (
-                UserRole
-                .delete()
-                .where(
-                    (UserRole.user_id == target_id)
-                    & (UserRole.role == "operator")
+        if role_to_remove == "admin":
+            admin_count = UserRole.select().where(
+                UserRole.role == "admin"
+            ).count()
+            if admin_count <= 1:
+                state_mgr.clear_state(user_id)
+                await message.answer(
+                    "Нельзя снять роль с последнего администратора."
                 )
-                .execute()
-            )
+                return
 
-            logging.info(
-                "Администратор %s снял operator с %s",
-                user_id,
-                target_id
-            )
-
-            keyboard = get_menu_keyboard(user_id)
-
-            await message.answer(
-                f"У пользователя {target_id} "
-                "снята роль оператора.",
-                attachments=[keyboard] if keyboard else None
-            )
+        deleted = UserRole.delete().where(
+            (UserRole.user_id == target_id)
+            & (UserRole.role == role_to_remove)
+        ).execute()
 
         state_mgr.clear_state(user_id)
 
-        return
-
-    
-    # ОБРАБОТКА СНЯТИЯ АДМИНИСТРАТОРА
-    
-
-    if (
-        state == "removing_admin"
-        and admin
-    ):
-
-        target_id = text
-
-        exists = (
-            UserRole
-            .select()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "admin")
-            )
-            .exists()
-        )
-
-        if not exists:
-
-            await message.answer(
-                f"У пользователя {target_id} "
-                "нет роли администратора."
-            )
-
-            state_mgr.clear_state(user_id)
-
+        if not deleted:
+            await message.answer("Роль уже отсутствует или пользователь не найден.")
             return
-
-        # Нельзя удалить последнего администратора
-        admin_count = (
-            UserRole
-            .select()
-            .where(UserRole.role == "admin")
-            .count()
-        )
-
-        if admin_count == 1:
-
-            await message.answer(
-                "Нельзя снять роль "
-                "с последнего администратора."
-            )
-
-            state_mgr.clear_state(user_id)
-
-            return
-
-        (
-            UserRole
-            .delete()
-            .where(
-                (UserRole.user_id == target_id)
-                & (UserRole.role == "admin")
-            )
-            .execute()
-        )
 
         logging.info(
-            "Администратор %s снял admin с %s",
-            user_id,
-            target_id
+            "Администратор %s снял роль %s с %s",
+            user_id, role_to_remove, target_id
         )
-
         keyboard = get_menu_keyboard(user_id)
-
         await message.answer(
-            f"У пользователя {target_id} "
-            "снята роль администратора.",
+            f"У пользователя {target_id} снята роль "
+            f"{'оператора' if role_to_remove == 'operator' else 'администратора'}.",
             attachments=[keyboard] if keyboard else None
         )
-
-        state_mgr.clear_state(user_id)
-
         return
 
-    
     # СПИСОК РОЛЕЙ
     
 
